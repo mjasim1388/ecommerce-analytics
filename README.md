@@ -49,7 +49,7 @@ This project builds a complete analytics pipeline — from raw CSV data to an in
 
 ## Live Demo
 
-(Will be added after deployment)
+🔗 [View the live dashboard](https://ecommerce-analytics-mjasim.streamlit.app/)
 
 ## Dataset
 

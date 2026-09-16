@@ -27,8 +27,9 @@ class CsvAnalytics:
         return self.df["order_date"].min().date(), self.df["order_date"].max().date()
 
     def get_states(self):
-        return sorted(self.df["state"].dropna().astype(str).unique().tolist())
-
+        states = sorted(self.df["state"].dropna().astype(str).unique().tolist())
+        # Return (display, code) tuples so the app code stays the same
+        return [(s, s) for s in states]
     def _apply(self, start_date=None, end_date=None, states=None):
         df = self.df
         if start_date is not None:

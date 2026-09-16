@@ -18,14 +18,50 @@ def get_date_range():
     return row["min_date"], row["max_date"]
 
 
+BRAZIL_STATES = {
+    "AC": "Acre",
+    "AL": "Alagoas",
+    "AP": "Amapá",
+    "AM": "Amazonas",
+    "BA": "Bahia",
+    "CE": "Ceará",
+    "DF": "Distrito Federal",
+    "ES": "Espírito Santo",
+    "GO": "Goiás",
+    "MA": "Maranhão",
+    "MT": "Mato Grosso",
+    "MS": "Mato Grosso do Sul",
+    "MG": "Minas Gerais",
+    "PA": "Pará",
+    "PB": "Paraíba",
+    "PR": "Paraná",
+    "PE": "Pernambuco",
+    "PI": "Piauí",
+    "RJ": "Rio de Janeiro",
+    "RN": "Rio Grande do Norte",
+    "RS": "Rio Grande do Sul",
+    "RO": "Rondônia",
+    "RR": "Roraima",
+    "SC": "Santa Catarina",
+    "SP": "São Paulo",
+    "SE": "Sergipe",
+    "TO": "Tocantins",
+}
+
+
 def get_states():
+    """
+    Returns list of (display_name, code) tuples, sorted by display name.
+    Example: ("São Paulo", "SP")
+    """
     sql = """
     SELECT DISTINCT customer_state AS state
     FROM customers
-    ORDER BY state;
+    WHERE customer_state IS NOT NULL
+    ORDER BY customer_state;
     """
-    return _query(sql)["state"].tolist()
-
+    codes = _query(sql)["state"].tolist()
+    return [(f"{BRAZIL_STATES.get(code, code)} ({code})", code) for code in codes]
 
 def _filters(start_date=None, end_date=None, states=None):
     clauses = ["o.order_status NOT IN ('canceled', 'unavailable')"]

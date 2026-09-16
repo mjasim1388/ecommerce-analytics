@@ -1,16 +1,10 @@
 import pandas as pd
-import numpy as np
 
 
 REQUIRED_COLUMNS = ["order_id", "order_date", "customer_id", "category", "state", "revenue"]
 
 
 class CsvAnalytics:
-    """
-    Same interface as the analytics module (top_kpis, monthly_revenue, ...)
-    but works on an uploaded pandas DataFrame instead of PostgreSQL.
-    """
-
     def __init__(self, df: pd.DataFrame):
         df = df.copy()
         df.columns = [str(c).strip().lower() for c in df.columns]
@@ -18,8 +12,7 @@ class CsvAnalytics:
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:
             raise ValueError(
-                f"CSV is missing required columns: {missing}. "
-                f"Required: {REQUIRED_COLUMNS}"
+                f"CSV is missing required columns: {missing}. Required: {REQUIRED_COLUMNS}"
             )
 
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
@@ -29,9 +22,27 @@ class CsvAnalytics:
 
         self.df = df
 
-    # ---------- KPIs ----------
-    def top_kpis(self):
+    # ---------- FILTERS ----------
+    def get_date_range(self):
+        return self.df["order_date"].min().date(), self.df["order_date"].max().date()
+
+    def get_states(self):
+        return sorted(self.df["state"].dropna().astype(str).unique().tolist())
+
+    def _apply(self, start_date=None, end_date=None, states=None):
         df = self.df
+        if start_date is not None:
+            df = df[df["order_date"] >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            end_dt = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+            df = df[df["order_date"] < end_dt]
+        if states:
+            df = df[df["state"].isin(states)]
+        return df
+
+    # ---------- KPIs ----------
+    def top_kpis(self, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
         total_orders = int(df["order_id"].nunique())
         total_customers = int(df["customer_id"].nunique())
         total_revenue = float(df["revenue"].sum())
@@ -43,9 +54,9 @@ class CsvAnalytics:
             "aov": round(aov, 2),
         }])
 
-    # ---------- Revenue over time ----------
-    def monthly_revenue(self):
-        df = self.df
+    # ---------- Trends ----------
+    def monthly_revenue(self, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
         out = df.groupby("month").agg(
             revenue=("revenue", "sum"),
             orders=("order_id", "nunique"),
@@ -53,14 +64,13 @@ class CsvAnalytics:
         out["revenue"] = out["revenue"].round(2)
         return out.sort_values("month")
 
-    def aov_trend(self):
-        m = self.monthly_revenue()
+    def aov_trend(self, start_date=None, end_date=None, states=None):
+        m = self.monthly_revenue(start_date, end_date, states)
         m["aov"] = (m["revenue"] / m["orders"]).round(2)
         return m[["month", "aov"]]
 
-    # ---------- Top products ----------
-    def top_products(self, limit=20):
-        df = self.df
+    def top_products(self, limit=20, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
         out = df.groupby("category").agg(
             orders=("order_id", "nunique"),
             revenue=("revenue", "sum"),
@@ -70,9 +80,8 @@ class CsvAnalytics:
         out["avg_price"] = out["avg_price"].round(2)
         return out.sort_values("revenue", ascending=False).head(limit)
 
-    # ---------- Revenue by state ----------
-    def revenue_by_state(self):
-        df = self.df
+    def revenue_by_state(self, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
         out = df.groupby("state").agg(
             orders=("order_id", "nunique"),
             revenue=("revenue", "sum"),
@@ -80,9 +89,9 @@ class CsvAnalytics:
         out["revenue"] = out["revenue"].round(2)
         return out.sort_values("revenue", ascending=False)
 
-    # ---------- Cohort retention ----------
-    def retention(self):
-        df = self.df
+    # ---------- Retention ----------
+    def retention(self, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
 
         first = df.groupby("customer_id")["order_date"].min().reset_index()
         first.columns = ["customer_id", "first_order"]
@@ -105,11 +114,20 @@ class CsvAnalytics:
                 )
             rows.append(row)
 
+        if not rows:
+            return pd.DataFrame(columns=["cohort"] + [f"month_{i}" for i in range(6)])
+
         return pd.DataFrame(rows).sort_values("cohort").reset_index(drop=True)
 
-    # ---------- RFM segments ----------
-    def rfm_segments(self):
-        df = self.df
+    # ---------- RFM ----------
+    def rfm_segments(self, start_date=None, end_date=None, states=None):
+        df = self._apply(start_date, end_date, states)
+        if df.empty:
+            return pd.DataFrame(columns=[
+                "segment", "customers", "avg_recency_days",
+                "avg_frequency", "avg_monetary", "total_revenue"
+            ])
+
         snapshot = df["order_date"].max() + pd.Timedelta(days=1)
 
         rfm = df.groupby("customer_id").agg(
@@ -120,15 +138,9 @@ class CsvAnalytics:
 
         rfm["recency_days"] = (snapshot - rfm["last_order"]).dt.days
 
-        rfm["r_score"] = pd.qcut(
-            rfm["recency_days"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1]
-        ).astype(int)
-        rfm["f_score"] = pd.qcut(
-            rfm["frequency"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]
-        ).astype(int)
-        rfm["m_score"] = pd.qcut(
-            rfm["monetary"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]
-        ).astype(int)
+        rfm["r_score"] = pd.qcut(rfm["recency_days"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1]).astype(int)
+        rfm["f_score"] = pd.qcut(rfm["frequency"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+        rfm["m_score"] = pd.qcut(rfm["monetary"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]).astype(int)
 
         def seg(row):
             r, f, m = row["r_score"], row["f_score"], row["m_score"]
@@ -160,7 +172,6 @@ class CsvAnalytics:
         return out.sort_values("total_revenue", ascending=False)
 
 
-# ---------- Sample CSV for users to download ----------
 def sample_csv_bytes() -> bytes:
     sample = pd.DataFrame([
         {"order_id": "1001", "order_date": "2023-01-05", "customer_id": "C001", "category": "Electronics", "state": "SP", "revenue": 150.00},

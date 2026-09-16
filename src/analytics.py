@@ -1,32 +1,88 @@
 import pandas as pd
 from db import engine
 
-START = "2017-01-01"
-END = "2019-01-01"
-
 
 def _query(sql):
     return pd.read_sql(sql, engine)
 
 
-def monthly_revenue():
+def get_date_range():
+    sql = """
+    SELECT
+        MIN(order_purchase_timestamp)::date AS min_date,
+        MAX(order_purchase_timestamp)::date AS max_date
+    FROM orders
+    WHERE order_status NOT IN ('canceled', 'unavailable');
+    """
+    row = _query(sql).iloc[0]
+    return row["min_date"], row["max_date"]
+
+
+def get_states():
+    sql = """
+    SELECT DISTINCT customer_state AS state
+    FROM customers
+    ORDER BY state;
+    """
+    return _query(sql)["state"].tolist()
+
+
+def _filters(start_date=None, end_date=None, states=None):
+    clauses = ["o.order_status NOT IN ('canceled', 'unavailable')"]
+
+    if start_date is not None:
+        clauses.append(f"o.order_purchase_timestamp >= '{start_date.isoformat()}'")
+
+    if end_date is not None:
+        clauses.append(
+            f"o.order_purchase_timestamp < '{end_date.isoformat()}'::date + INTERVAL '1 day'"
+        )
+
+    if states:
+        quoted = ", ".join(f"'{s}'" for s in states)
+        clauses.append(f"c.customer_state IN ({quoted})")
+
+    return " AND ".join(clauses)
+
+
+def top_kpis(start_date=None, end_date=None, states=None):
+    where = _filters(start_date, end_date, states)
+    sql = f"""
+    SELECT
+        COUNT(DISTINCT o.order_id) AS total_orders,
+        COUNT(DISTINCT c.customer_unique_id) AS total_customers,
+        ROUND(SUM(oi.price + oi.freight_value)::numeric, 2) AS total_revenue,
+        ROUND(
+            (SUM(oi.price + oi.freight_value) / COUNT(DISTINCT o.order_id))::numeric,
+            2
+        ) AS aov
+    FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
+    JOIN order_items oi ON oi.order_id = o.order_id
+    WHERE {where};
+    """
+    return _query(sql)
+
+
+def monthly_revenue(start_date=None, end_date=None, states=None):
+    where = _filters(start_date, end_date, states)
     sql = f"""
     SELECT
         DATE_TRUNC('month', o.order_purchase_timestamp)::date AS month,
         ROUND(SUM(oi.price + oi.freight_value)::numeric, 2) AS revenue,
         COUNT(DISTINCT o.order_id) AS orders
     FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
     JOIN order_items oi ON oi.order_id = o.order_id
-    WHERE o.order_status NOT IN ('canceled', 'unavailable')
-      AND o.order_purchase_timestamp >= '{START}'
-      AND o.order_purchase_timestamp < '{END}'
+    WHERE {where}
     GROUP BY month
     ORDER BY month;
     """
     return _query(sql)
 
 
-def aov_trend():
+def aov_trend(start_date=None, end_date=None, states=None):
+    where = _filters(start_date, end_date, states)
     sql = f"""
     SELECT
         DATE_TRUNC('month', o.order_purchase_timestamp)::date AS month,
@@ -35,17 +91,17 @@ def aov_trend():
             2
         ) AS aov
     FROM orders o
+    JOIN customers c ON c.customer_id = o.customer_id
     JOIN order_items oi ON oi.order_id = o.order_id
-    WHERE o.order_status NOT IN ('canceled', 'unavailable')
-      AND o.order_purchase_timestamp >= '{START}'
-      AND o.order_purchase_timestamp < '{END}'
+    WHERE {where}
     GROUP BY month
     ORDER BY month;
     """
     return _query(sql)
 
 
-def top_products(limit=20):
+def top_products(limit=20, start_date=None, end_date=None, states=None):
+    where = _filters(start_date, end_date, states)
     sql = f"""
     SELECT
         p.product_category_name AS category,
@@ -55,7 +111,8 @@ def top_products(limit=20):
     FROM order_items oi
     JOIN products p ON p.product_id = oi.product_id
     JOIN orders o ON o.order_id = oi.order_id
-    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    JOIN customers c ON c.customer_id = o.customer_id
+    WHERE {where}
       AND p.product_category_name IS NOT NULL
     GROUP BY category
     ORDER BY revenue DESC
@@ -64,8 +121,9 @@ def top_products(limit=20):
     return _query(sql)
 
 
-def revenue_by_state():
-    sql = """
+def revenue_by_state(start_date=None, end_date=None, states=None):
+    where = _filters(start_date, end_date, states)
+    sql = f"""
     SELECT
         c.customer_state AS state,
         COUNT(DISTINCT o.order_id) AS orders,
@@ -73,22 +131,34 @@ def revenue_by_state():
     FROM orders o
     JOIN customers c ON c.customer_id = o.customer_id
     JOIN order_items oi ON oi.order_id = o.order_id
-    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    WHERE {where}
     GROUP BY state
     ORDER BY revenue DESC;
     """
     return _query(sql)
 
 
-def retention():
-    sql = """
+def _date_only_filter(start_date=None, end_date=None):
+    clauses = ["o.order_status NOT IN ('canceled', 'unavailable')"]
+    if start_date is not None:
+        clauses.append(f"o.order_purchase_timestamp >= '{start_date.isoformat()}'")
+    if end_date is not None:
+        clauses.append(
+            f"o.order_purchase_timestamp < '{end_date.isoformat()}'::date + INTERVAL '1 day'"
+        )
+    return " AND ".join(clauses)
+
+
+def retention(start_date=None, end_date=None, states=None):
+    where = _date_only_filter(start_date, end_date)
+    sql = f"""
     WITH customer_first_order AS (
         SELECT
             c.customer_unique_id,
             MIN(DATE_TRUNC('month', o.order_purchase_timestamp)) AS cohort_month
         FROM orders o
         JOIN customers c ON c.customer_id = o.customer_id
-        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        WHERE {where}
         GROUP BY c.customer_unique_id
     ),
     customer_orders AS (
@@ -97,7 +167,7 @@ def retention():
             DATE_TRUNC('month', o.order_purchase_timestamp) AS order_month
         FROM orders o
         JOIN customers c ON c.customer_id = o.customer_id
-        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        WHERE {where}
     ),
     cohort_data AS (
         SELECT
@@ -123,8 +193,9 @@ def retention():
     return _query(sql)
 
 
-def rfm_segments():
-    sql = """
+def rfm_segments(start_date=None, end_date=None, states=None):
+    where = _date_only_filter(start_date, end_date)
+    sql = f"""
     WITH customer_metrics AS (
         SELECT
             c.customer_unique_id,
@@ -134,16 +205,19 @@ def rfm_segments():
         FROM orders o
         JOIN customers c ON c.customer_id = o.customer_id
         JOIN order_items oi ON oi.order_id = o.order_id
-        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        WHERE {where}
         GROUP BY c.customer_unique_id
+    ),
+    snapshot AS (
+        SELECT MAX(last_order_date) + INTERVAL '1 day' AS snap FROM customer_metrics
     ),
     scored AS (
         SELECT
             customer_unique_id,
-            (CURRENT_DATE - last_order_date) AS recency_days,
+            ((SELECT snap FROM snapshot)::date - last_order_date) AS recency_days,
             frequency,
             monetary,
-            NTILE(5) OVER (ORDER BY (CURRENT_DATE - last_order_date) DESC) AS r_score,
+            NTILE(5) OVER (ORDER BY ((SELECT snap FROM snapshot)::date - last_order_date) DESC) AS r_score,
             NTILE(5) OVER (ORDER BY frequency ASC) AS f_score,
             NTILE(5) OVER (ORDER BY monetary ASC) AS m_score
         FROM customer_metrics
@@ -165,25 +239,5 @@ def rfm_segments():
     FROM scored
     GROUP BY segment
     ORDER BY total_revenue DESC;
-    """
-    return _query(sql)
-
-
-def top_kpis():
-    sql = f"""
-    SELECT
-        COUNT(DISTINCT o.order_id) AS total_orders,
-        COUNT(DISTINCT c.customer_unique_id) AS total_customers,
-        ROUND(SUM(oi.price + oi.freight_value)::numeric, 2) AS total_revenue,
-        ROUND(
-            (SUM(oi.price + oi.freight_value) / COUNT(DISTINCT o.order_id))::numeric,
-            2
-        ) AS aov
-    FROM orders o
-    JOIN customers c ON c.customer_id = o.customer_id
-    JOIN order_items oi ON oi.order_id = o.order_id
-    WHERE o.order_status NOT IN ('canceled', 'unavailable')
-      AND o.order_purchase_timestamp >= '{START}'
-      AND o.order_purchase_timestamp < '{END}';
     """
     return _query(sql)

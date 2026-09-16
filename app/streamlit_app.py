@@ -13,7 +13,7 @@ from csv_analytics import CsvAnalytics, sample_csv_bytes
 
 st.set_page_config(page_title="E-commerce Analytics", layout="wide")
 
-# ---------------- SIDEBAR ----------------
+# ---------------- SIDEBAR: DATA SOURCE ----------------
 st.sidebar.title("Data Source")
 
 source = st.sidebar.radio(
@@ -22,11 +22,12 @@ source = st.sidebar.radio(
     index=0,
 )
 
-analytics = None  # this will be either db_analytics module or CsvAnalytics instance
+analytics = None
+is_csv = (source == "Upload my CSV")
 
-if source == "Sample data (Olist)":
+if not is_csv:
     analytics = db_analytics
-    st.sidebar.success("Using 100K+ orders from the Olist dataset.")
+    st.sidebar.success("Using 100K+ orders from Olist dataset.")
 else:
     st.sidebar.markdown(
         "**Required CSV columns:**\n"
@@ -48,10 +49,7 @@ else:
 
     if uploaded is None:
         st.title("Upload your CSV to get started")
-        st.info(
-            "Use the sidebar to upload a CSV. "
-            "The app will compute the same KPIs, charts, retention, and RFM analysis on your data."
-        )
+        st.info("Use the sidebar to upload a CSV. Analytics will be computed on your data.")
         st.markdown("### Expected CSV format")
         st.code(
             "order_id,order_date,customer_id,category,state,revenue\n"
@@ -64,20 +62,62 @@ else:
     try:
         df = pd.read_csv(uploaded)
         analytics = CsvAnalytics(df)
-        st.sidebar.success(f"Loaded {len(df):,} rows from your CSV.")
+        st.sidebar.success(f"Loaded {len(df):,} rows.")
     except Exception as e:
         st.error(f"Could not read CSV: {e}")
         st.stop()
 
+# ---------------- SIDEBAR: FILTERS ----------------
+st.sidebar.divider()
+st.sidebar.subheader("Filters")
+
+try:
+    min_date, max_date = analytics.get_date_range()
+    min_date = pd.Timestamp(min_date).date()
+    max_date = pd.Timestamp(max_date).date()
+
+    date_range = st.sidebar.date_input(
+        "Date range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
+    )
+
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = min_date, max_date
+
+    all_states = analytics.get_states()
+    selected_states = st.sidebar.multiselect(
+        "States",
+        all_states,
+        default=all_states,
+    )
+
+    if not selected_states:
+        selected_states = all_states
+        st.sidebar.caption("No states selected — showing all.")
+
+    if start_date == min_date and end_date == max_date and len(selected_states) == len(all_states):
+        st.sidebar.caption("Showing all data. Adjust filters above.")
+    else:
+        st.sidebar.success("Filters active")
+except Exception as e:
+    st.sidebar.error(f"Filter load failed: {e}")
+    start_date, end_date, selected_states = None, None, None
+
+filters = dict(start_date=start_date, end_date=end_date, states=selected_states)
+
 # ---------------- HEADER ----------------
 st.title("E-commerce Sales Analytics")
-if source == "Sample data (Olist)":
-    st.caption("Brazilian Olist dataset — 2017 to 2018")
+if is_csv:
+    st.caption("Uploaded CSV")
 else:
-    st.caption("Uploaded CSV — custom dataset")
+    st.caption("Brazilian Olist dataset — 2017 to 2018")
 
 # ---------------- KPIs ----------------
-kpi = analytics.top_kpis().iloc[0]
+kpi = analytics.top_kpis(**filters).iloc[0]
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Revenue", f"R$ {kpi['total_revenue']:,.0f}")
@@ -89,7 +129,7 @@ st.divider()
 
 # ---------------- REVENUE ----------------
 st.subheader("Revenue Over Time")
-rev = analytics.monthly_revenue()
+rev = analytics.monthly_revenue(**filters)
 fig_rev = px.line(
     rev, x="month", y="revenue", markers=True,
     labels={"month": "Month", "revenue": "Revenue (R$)"},
@@ -98,7 +138,7 @@ st.plotly_chart(fig_rev, use_container_width=True)
 
 # ---------------- AOV ----------------
 st.subheader("Average Order Value Trend")
-aov = analytics.aov_trend()
+aov = analytics.aov_trend(**filters)
 fig_aov = px.line(
     aov, x="month", y="aov", markers=True,
     labels={"month": "Month", "aov": "AOV (R$)"},
@@ -112,7 +152,7 @@ colA, colB = st.columns(2)
 
 with colA:
     st.subheader("Top Product Categories")
-    top = analytics.top_products(15)
+    top = analytics.top_products(15, **filters)
     fig_top = px.bar(
         top.sort_values("revenue"),
         x="revenue", y="category", orientation="h",
@@ -122,9 +162,9 @@ with colA:
 
 with colB:
     st.subheader("Revenue by State")
-    states = analytics.revenue_by_state()
+    states_df = analytics.revenue_by_state(**filters)
     fig_state = px.bar(
-        states.sort_values("revenue"),
+        states_df.sort_values("revenue"),
         x="revenue", y="state", orientation="h",
         labels={"revenue": "Revenue (R$)", "state": ""},
     )
@@ -134,14 +174,14 @@ st.divider()
 
 # ---------------- RETENTION ----------------
 st.subheader("Cohort Retention (month 0–5)")
-ret = analytics.retention()
+ret = analytics.retention(**filters)
 st.dataframe(ret, use_container_width=True)
 
 st.divider()
 
 # ---------------- RFM ----------------
 st.subheader("Customer Segments (RFM)")
-rfm = analytics.rfm_segments()
+rfm = analytics.rfm_segments(**filters)
 
 colC, colD = st.columns(2)
 with colC:

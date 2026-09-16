@@ -3,14 +3,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-# Load .env from project root
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=env_path)
+# Try Streamlit secrets first (for cloud deployment)
+try:
+    import streamlit as st
+    DATABASE_URL = st.secrets.get("DATABASE_URL")
+except Exception:
+    DATABASE_URL = None
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Fall back to .env (for local development)
+if not DATABASE_URL:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL not found in .env file")
+    raise ValueError("DATABASE_URL not found in .env or Streamlit secrets")
 
 engine = create_engine(DATABASE_URL, echo=False)
 

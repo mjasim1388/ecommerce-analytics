@@ -12,6 +12,7 @@ This project builds a complete analytics pipeline — from raw CSV data to an in
 - **SQL analytics**: 6 production-style queries including cohort retention and RFM segmentation
 - **Python layer**: Reusable analytics module returning pandas DataFrames
 - **Interactive dashboard**: Streamlit + Plotly with KPI cards, charts, and drill-downs
+- **Custom CSV upload**: Users can upload their own sales CSV (columns: order_id, order_date, customer_id, category, state, revenue) and get the full analytics — KPIs, revenue trends, AOV, top products, revenue by state, cohort retention, and RFM segmentation — computed on their data
 
 ## Key Metrics
 

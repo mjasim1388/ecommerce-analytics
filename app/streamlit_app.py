@@ -9,7 +9,12 @@ import pandas as pd
 import plotly.express as px
 
 import analytics as db_analytics
-from csv_analytics import CsvAnalytics, sample_csv_bytes
+from csv_analytics import (
+    CsvAnalytics,
+    sample_csv_bytes,
+    auto_detect_mapping,
+    REQUIRED_COLUMNS,
+)
 
 st.set_page_config(page_title="E-commerce Analytics", layout="wide")
 
@@ -27,14 +32,17 @@ source = st.sidebar.radio(
 
 analytics = None
 is_csv = (source == "Upload my CSV")
+mapping_ui_needed = False
+df_raw = None
 
 if not is_csv:
     analytics = db_analytics
     st.sidebar.success("Using 100K+ orders from Olist dataset.")
 else:
     st.sidebar.markdown(
-        "**Required CSV columns:** `order_id`, `order_date`, `customer_id`, "
-        "`category`, `state`, `revenue`"
+        "**Required columns:** `order_id`, `order_date`, `customer_id`, "
+        "`category`, `state`, `revenue`  \n"
+        "*Your CSV can use different names — you'll map them after upload.*"
     )
     st.sidebar.download_button(
         label="Download sample CSV",
@@ -48,7 +56,10 @@ else:
     if uploaded is None:
         st.title("Upload your CSV to get started")
         st.info("Use the sidebar to upload a CSV. Analytics will be computed on your data.")
-        st.markdown("### Expected CSV format")
+        st.markdown("### Expected data")
+        st.markdown("Your CSV needs columns for: **order, date, customer, category, region, amount**.")
+        st.markdown("Column names can be anything — you'll map them in the next step.")
+        st.markdown("### Sample format")
         st.code(
             "order_id,order_date,customer_id,category,state,revenue\n"
             "1001,2023-01-05,C001,Electronics,SP,150.00\n"
@@ -57,12 +68,85 @@ else:
         )
         st.stop()
 
+    # ---- Read CSV ----
     try:
-        df = pd.read_csv(uploaded)
-        analytics = CsvAnalytics(df)
-        st.sidebar.success(f"Loaded {len(df):,} rows.")
+        df_raw = pd.read_csv(uploaded)
+        df_raw.columns = [str(c).strip().lower() for c in df_raw.columns]
     except Exception as e:
         st.error(f"Could not read CSV: {e}")
+        st.stop()
+
+    # ---- Check if mapping is needed ----
+    missing = [c for c in REQUIRED_COLUMNS if c not in df_raw.columns]
+
+    if missing:
+        mapping_ui_needed = True
+
+        st.sidebar.divider()
+        st.sidebar.subheader("Map your columns")
+        st.sidebar.caption(
+            "Your CSV doesn't have all the columns we need with the exact names. "
+            "Tell us which of your columns matches each requirement."
+        )
+
+        auto = auto_detect_mapping(df_raw.columns.tolist())
+        user_cols = ["(skip)"] + df_raw.columns.tolist()
+        mapping = {}
+
+        for req in REQUIRED_COLUMNS:
+            is_mapped = req not in missing
+            default = auto.get(req, "(skip)")
+            idx = user_cols.index(default) if default in user_cols else 0
+
+            label = f"✓ {req}" if is_mapped else f"→ {req}"
+            sel = st.sidebar.selectbox(
+                label,
+                user_cols,
+                index=idx,
+                key=f"map_{req}",
+                disabled=is_mapped,
+            )
+            if is_mapped:
+                mapping[req] = req
+            elif sel != "(skip)":
+                mapping[req] = sel
+    else:
+        mapping = {req: req for req in REQUIRED_COLUMNS}
+
+# ============================================================
+# MAIN AREA — mapping preview if needed
+# ============================================================
+if mapping_ui_needed:
+    st.title("Map your CSV columns")
+
+    st.info(
+        "Your CSV column names don't match our expected schema. "
+        "Use the sidebar on the left to map your columns, then the dashboard will load."
+    )
+
+    st.markdown("#### Your CSV preview")
+    st.dataframe(df_raw.head(10), use_container_width=True)
+
+    still_missing = [r for r in REQUIRED_COLUMNS if r not in mapping]
+    if still_missing:
+        st.warning(f"Still need to map: **{', '.join(still_missing)}**")
+        st.stop()
+    else:
+        try:
+            analytics = CsvAnalytics(df_raw, mapping=mapping)
+            st.sidebar.success(f"Mapped and loaded {len(df_raw):,} rows.")
+        except Exception as e:
+            st.error(f"Could not apply mapping: {e}")
+            st.stop()
+
+if not is_csv:
+    pass  # using db_analytics
+elif not mapping_ui_needed:
+    try:
+        analytics = CsvAnalytics(df_raw)
+        st.sidebar.success(f"Loaded {len(df_raw):,} rows.")
+    except Exception as e:
+        st.error(f"Could not load CSV: {e}")
         st.stop()
 
 # ============================================================
@@ -70,9 +154,8 @@ else:
 # ============================================================
 st.sidebar.divider()
 
-# Reset button — clears session state
 if st.sidebar.button("Reset filters", use_container_width=True):
-    for key in ["quick_range", "date_range", "states_pick", "states_all_flag"]:
+    for key in ["quick_range", "date_range", "states_pick", "start_date", "end_date"]:
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -84,13 +167,11 @@ try:
     max_date = pd.Timestamp(max_date).date()
     all_states = analytics.get_states()
 
-    # ----- Quick date presets -----
     st.sidebar.caption("Quick range")
     quick = st.sidebar.radio(
         "Quick range",
         ["All time", "Last 12 months", "Last 6 months", "Last 3 months", "Custom"],
         index=0,
-        horizontal=False,
         label_visibility="collapsed",
         key="quick_range",
     )
@@ -112,31 +193,20 @@ try:
     else:  # Custom
         st.sidebar.caption("From")
         start_date = st.sidebar.date_input(
-            "Start date",
-            value=min_date,
-            min_value=min_date,
-            max_value=max_date,
-            label_visibility="collapsed",
-            key="start_date",
+            "Start date", value=min_date, min_value=min_date, max_value=max_date,
+            label_visibility="collapsed", key="start_date",
         )
         st.sidebar.caption("To")
         end_date = st.sidebar.date_input(
-            "End date",
-            value=max_date,
-            min_value=min_date,
-            max_value=max_date,
-            label_visibility="collapsed",
-            key="end_date",
+            "End date", value=max_date, min_value=min_date, max_value=max_date,
+            label_visibility="collapsed", key="end_date",
         )
-
-        # Safety: if user picks start > end, swap or warn
         if start_date > end_date:
             st.sidebar.warning("Start date is after end date — swapping.")
             start_date, end_date = end_date, start_date
-    # ----- State selection -----
+
     st.sidebar.divider()
 
-    # all_states is now a list of (display_name, code) tuples
     display_names = [name for name, code in all_states]
     code_lookup = {name: code for name, code in all_states}
 
@@ -146,7 +216,6 @@ try:
     if btn_col2.button("Clear all", use_container_width=True):
         st.session_state["states_pick"] = []
 
-    # Initialize session state
     if "states_pick" not in st.session_state:
         st.session_state["states_pick"] = display_names
 
@@ -157,13 +226,11 @@ try:
         placeholder="Choose one or more states",
     )
 
-    # Convert display names back to codes for the queries
     selected_states = [code_lookup[name] for name in selected_display]
-
-    # If user clears all, show everything (safer default)
     if not selected_states:
         selected_states = [code for _, code in all_states]
         st.sidebar.caption("No states selected — showing all.")
+
 except Exception as e:
     st.sidebar.error(f"Filter load failed: {e}")
     start_date, end_date, selected_states = None, None, None
@@ -179,7 +246,6 @@ if is_csv:
 else:
     st.caption("Brazilian Olist dataset — 2017 to 2018")
 
-# Show active filter summary
 is_filtered = (
     (start_date is not None and start_date != min_date) or
     (end_date is not None and end_date != max_date) or

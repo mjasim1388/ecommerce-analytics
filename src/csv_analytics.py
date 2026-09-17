@@ -4,10 +4,68 @@ import pandas as pd
 REQUIRED_COLUMNS = ["order_id", "order_date", "customer_id", "category", "state", "revenue"]
 
 
+# Common column names we auto-detect
+AUTO_DETECT_SYNONYMS = {
+    "order_id": [
+        "order_id", "orderid", "invoice_no", "invoice", "invoice_number",
+        "transaction_id", "transaction", "id", "order_number", "order_no",
+    ],
+    "order_date": [
+        "order_date", "date", "purchase_date", "invoice_date", "created_at",
+        "transaction_date", "order_timestamp", "sale_date",
+    ],
+    "customer_id": [
+        "customer_id", "customerid", "customer", "buyer", "buyer_id",
+        "user_id", "cust_id", "client_id", "customer_email", "email",
+    ],
+    "category": [
+        "category", "product_category", "product_type", "dept", "department",
+        "type", "product", "product_name", "item",
+    ],
+    "state": [
+        "state", "region", "city", "country", "location", "province",
+        "territory", "area",
+    ],
+    "revenue": [
+        "revenue", "amount", "total", "total_sales", "price", "sales",
+        "value", "order_value", "revenue_amount", "line_total", "subtotal",
+    ],
+}
+
+
+def auto_detect_mapping(user_columns):
+    """
+    Given a list of user column names (already lowercased), return
+    a dict {required_col: user_col} for the columns we're confident about.
+    """
+    user_cols_lower = [str(c).lower().strip() for c in user_columns]
+    result = {}
+    for required, synonyms in AUTO_DETECT_SYNONYMS.items():
+        if required in user_cols_lower:
+            result[required] = required
+            continue
+        for syn in synonyms:
+            if syn in user_cols_lower:
+                result[required] = syn
+                break
+    return result
+
+
 class CsvAnalytics:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, mapping: dict = None):
         df = df.copy()
         df.columns = [str(c).strip().lower() for c in df.columns]
+
+        # Apply user-provided mapping: rename their columns to our required names
+        if mapping:
+            rename_dict = {}
+            for required, user_col in mapping.items():
+                if not user_col:
+                    continue
+                user_col = str(user_col).strip().lower()
+                if user_col != required and required not in df.columns:
+                    rename_dict[user_col] = required
+            df = df.rename(columns=rename_dict)
 
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:
@@ -28,8 +86,8 @@ class CsvAnalytics:
 
     def get_states(self):
         states = sorted(self.df["state"].dropna().astype(str).unique().tolist())
-        # Return (display, code) tuples so the app code stays the same
         return [(s, s) for s in states]
+
     def _apply(self, start_date=None, end_date=None, states=None):
         df = self.df
         if start_date is not None:
@@ -67,6 +125,8 @@ class CsvAnalytics:
 
     def aov_trend(self, start_date=None, end_date=None, states=None):
         m = self.monthly_revenue(start_date, end_date, states)
+        if m.empty:
+            return m.assign(aov=[])
         m["aov"] = (m["revenue"] / m["orders"]).round(2)
         return m[["month", "aov"]]
 
@@ -93,6 +153,8 @@ class CsvAnalytics:
     # ---------- Retention ----------
     def retention(self, start_date=None, end_date=None, states=None):
         df = self._apply(start_date, end_date, states)
+        if df.empty:
+            return pd.DataFrame(columns=["cohort"] + [f"month_{i}" for i in range(6)])
 
         first = df.groupby("customer_id")["order_date"].min().reset_index()
         first.columns = ["customer_id", "first_order"]
@@ -115,9 +177,6 @@ class CsvAnalytics:
                 )
             rows.append(row)
 
-        if not rows:
-            return pd.DataFrame(columns=["cohort"] + [f"month_{i}" for i in range(6)])
-
         return pd.DataFrame(rows).sort_values("cohort").reset_index(drop=True)
 
     # ---------- RFM ----------
@@ -139,9 +198,15 @@ class CsvAnalytics:
 
         rfm["recency_days"] = (snapshot - rfm["last_order"]).dt.days
 
-        rfm["r_score"] = pd.qcut(rfm["recency_days"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1]).astype(int)
-        rfm["f_score"] = pd.qcut(rfm["frequency"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]).astype(int)
-        rfm["m_score"] = pd.qcut(rfm["monetary"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]).astype(int)
+        rfm["r_score"] = pd.qcut(
+            rfm["recency_days"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1]
+        ).astype(int)
+        rfm["f_score"] = pd.qcut(
+            rfm["frequency"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]
+        ).astype(int)
+        rfm["m_score"] = pd.qcut(
+            rfm["monetary"].rank(method="first"), 5, labels=[1, 2, 3, 4, 5]
+        ).astype(int)
 
         def seg(row):
             r, f, m = row["r_score"], row["f_score"], row["m_score"]
